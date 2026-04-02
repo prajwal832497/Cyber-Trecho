@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chrono Castle // The Wasteland</title>
+    <style>
+        body { margin: 0; background: #ff5e00; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; user-select: none; }
+        canvas { display: block; image-rendering: pixelated; } 
+        #ui { position: absolute; top: 20px; left: 20px; color: #fff; pointer-events: none; text-shadow: 2px 2px 0px rgba(0,0,0,0.8); }
+        .title { font-size: 34px; font-weight: 900; color: #ffcc00; letter-spacing: 2px; text-transform: uppercase; text-shadow: 3px 3px 0px #8b0000; }
+        .stats { font-size: 24px; font-weight: bold; margin-top: 10px; color: #fff; }
+        .hp-bar { width: 300px; height: 24px; background: #1a0000; border: 3px solid #ffcc00; margin-top: 10px; border-radius: 4px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        #hp-fill { height: 100%; background: #06d6a0; width: 100%; transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(26, 0, 0, 0.9); display: none; align-items: center; justify-content: center; flex-direction: column; color: #fff; z-index: 10; }
+        #overlay h1 { font-size: 80px; margin: 0; color: #ffcc00; text-shadow: 4px 4px 0px #8b0000; text-transform: uppercase; }
+        #overlay p { font-size: 24px; color: #ecf0f1; margin-top: 10px; font-weight: bold; }
+        #controls { position: absolute; bottom: 20px; left: 20px; color: #fff; font-size: 16px; font-weight: bold; pointer-events: none; background: rgba(139, 0, 0, 0.8); padding: 12px 18px; border-radius: 8px; border: 2px solid #ffcc00; box-shadow: 0 4px 8px rgba(0,0,0,0.5); }
+        .highlight { color: #ffcc00; font-size: 18px; text-shadow: 1px 1px 0px #000; }
+        .objective { color: #06d6a0; margin-top: 5px; font-size: 18px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="title">WASTELAND PROTOCOL</div>
+        <div class="hp-bar"><div id="hp-fill"></div></div>
+        <div class="stats">ENERGY CORES: <span id="stars">0</span> / 15</div>
+        <div class="objective" id="objective-text">Collect 15 Cores to activate the Portal!</div>
+    </div>
+    
+    <div id="controls">
+        [A/D] MOVE | [SPACE] JUMP | [CLICK] MAGIC BOLT | <span class="highlight">[G] FLIP GRAVITY</span>
+    </div>
+
+    <div id="overlay">
+        <h1 id="end-title">PORTAL BREACHED</h1>
+        <p>Click anywhere to restart sequence.</p>
+    </div>
+
+    <canvas id="game"></canvas>
+
+<script>
+    'use strict';
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    
+    let w, h, frames = 0;
+    let camera = { x: 0, y: 0 };
+    const keys = {};
+    let gameState = 'playing'; 
+    
+    const WORLD = { w: 4000, h: 3200, gravity: 0.35, gravityDir: 1, friction: 0.82 };
+    let entities = { platforms: [], enemies: [], bullets: [], ambient: [], stars: [], gate: null, ruinsBg: [], ruinsMid: [], ruinsFg: [] };
+
+    function drawDetailedLimb(x, y, angle, length, thickness, baseColor, shadowColor) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.fillStyle = shadowColor;
+        ctx.beginPath(); ctx.roundRect(-thickness/2 - 1, -1, thickness + 2, length + 2, thickness/2); ctx.fill();
+        ctx.fillStyle = baseColor;
+        ctx.beginPath(); ctx.roundRect(-thickness/2, 0, thickness, length, thickness/2); ctx.fill();
+        ctx.restore();
+    }
+
+    class Player {
+        constructor() {
+            this.x = 200; this.y = WORLD.h - 100; this.w = 32; this.h = 48;
+            this.vx = 0; this.vy = 0; 
+            this.speed = 0.85; 
+            this.hp = 100; this.stars = 0;
+            this.isGrounded = false; this.canDoubleJump = false;
+            this.jumpHeld = false; this.gravityToggleHeld = false;
+            this.cooldown = 0; this.animTimer = 0;
+        }
+
+        update() {
+            if (gameState !== 'playing') return;
+            this.cooldown--;
+
+            if (keys['KeyG'] && !this.gravityToggleHeld) {
+                WORLD.gravityDir *= -1; 
+                this.gravityToggleHeld = true;
+                burst(this.x + this.w/2, this.y + this.h/2, "#ffcc00", 20); 
+            } else if (!keys['KeyG']) {
+                this.gravityToggleHeld = false;
+            }
+
+            if (keys['KeyD'] || keys['ArrowRight']) this.vx += this.speed;
+            if (keys['KeyA'] || keys['ArrowLeft']) this.vx -= this.speed;
+            
+            this.vx *= WORLD.friction;
+            this.vy += WORLD.gravity * WORLD.gravityDir;
+            
+            if (keys['Space'] || keys['KeyW'] || keys['ArrowUp']) {
+                if (this.isGrounded) {
+                    this.vy = -11 * WORLD.gravityDir;
+                    this.isGrounded = false;
+                    burst(this.x + this.w/2, WORLD.gravityDir === 1 ? this.y + this.h : this.y, "#fff"); 
+                } else if (this.canDoubleJump && !this.jumpHeld) {
+                    this.vy = -10 * WORLD.gravityDir;
+                    this.canDoubleJump = false;
+                    burst(this.x + this.w/2, WORLD.gravityDir === 1 ? this.y + this.h : this.y, "#3498db"); 
+                }
+                this.jumpHeld = true;
+            } else {
+                this.jumpHeld = false;
+            }
+
+            this.x += this.vx;
+            if (this.x < 0) { this.x = 0; this.vx = 0; }
+            if (this.x > WORLD.w - this.w) { this.x = WORLD.w - this.w; this.vx = 0; }
+
+            for (let p of entities.platforms) {
+                if (this.y + this.h > p.y && this.y < p.y + p.h) {
+                    if (this.vx > 0 && this.x + this.w > p.x && this.x < p.x) { this.x = p.x - this.w; this.vx = 0; }
+                    if (this.vx < 0 && this.x < p.x + p.w && this.x + this.w > p.x + p.w) { this.x = p.x + p.w; this.vx = 0; }
+                }
+            }
+
+            this.y += this.vy;
+            this.isGrounded = false;
+
+            for (let p of entities.platforms) {
+                if (this.x + this.w > p.x && this.x < p.x + p.w) {
+                    if (WORLD.gravityDir === 1) { 
+                        if (this.vy > 0 && this.y + this.h >= p.y && this.y + this.h <= p.y + 25) {
+                            this.y = p.y - this.h; this.vy = 0; this.isGrounded = true; this.canDoubleJump = true;
+                        } else if (this.vy < 0 && this.y <= p.y + p.h && this.y >= p.y + p.h - 25) {
+                            this.y = p.y + p.h; this.vy = 0;
+                        }
+                    } else { 
+                        if (this.vy < 0 && this.y <= p.y + p.h && this.y >= p.y + p.h - 25) {
+                            this.y = p.y + p.h; this.vy = 0; this.isGrounded = true; this.canDoubleJump = true;
+                        } else if (this.vy > 0 && this.y + this.h >= p.y && this.y + this.h <= p.y + 25) {
+                            this.y = p.y - this.h; this.vy = 0;
+                        }
+                    }
+                }
+            }
+
+            if (this.y < 0) { this.y = 0; this.vy = 0; if (WORLD.gravityDir === -1) this.isGrounded = true; }
+            if (this.y > WORLD.h - this.h) { this.y = WORLD.h - this.h; this.vy = 0; if (WORLD.gravityDir === 1) this.isGrounded = true; }
+
+            camera.x += ((this.x - w / 2) - camera.x) * 0.1;
+            camera.y += ((this.y - h / 2) - camera.y) * 0.1; 
+            
+            if (camera.x < 0) camera.x = 0;
+            if (camera.x > WORLD.w - w) camera.x = WORLD.w - w;
+            if (camera.y < 0) camera.y = 0;
+            if (camera.y > WORLD.h - h) camera.y = WORLD.h - h;
+
+            if (Math.abs(this.vx) > 0.5 && this.isGrounded) this.animTimer += 0.35;
+            else this.animTimer = 0;
+        }
+
+        draw() {
+            ctx.save(); 
+            ctx.translate(this.x - camera.x + this.w/2, this.y - camera.y + this.h/2);
+            ctx.scale(1, WORLD.gravityDir); 
+            
+            let scaleY = 1; let scaleX = 1;
+            if (!this.isGrounded && this.vy * WORLD.gravityDir < 0) { scaleY = 1.1; scaleX = 0.9; } 
+            else if (!this.isGrounded && this.vy * WORLD.gravityDir > 0) { scaleY = 0.9; scaleX = 1.1; } 
+            
+            ctx.scale(scaleX, scaleY);
+            ctx.translate(-this.w/2, -this.h/2);
+
+            let swing = Math.sin(this.animTimer) * 0.8;
+            if (!this.isGrounded) swing = Math.PI / 5; 
+
+            drawDetailedLimb(this.w/2, this.h/2, -swing, 16, 6, "#34495e", "#2c3e50"); 
+            drawDetailedLimb(this.w/2, this.h - 14, swing, 18, 8, "#2c3e50", "#1a252f"); 
+
+            ctx.fillStyle = "#2980b9"; 
+            ctx.beginPath(); ctx.roundRect(2, 8, this.w - 4, 30, 6); ctx.fill();
+            ctx.fillStyle = "#3498db"; 
+            ctx.beginPath(); ctx.roundRect(4, 10, this.w - 8, 26, 4); ctx.fill();
+            
+            ctx.fillStyle = "#d35400"; ctx.fillRect(6, 22, this.w - 12, 6); 
+            ctx.fillStyle = "#f1c40f"; ctx.fillRect(12, 21, 8, 8); 
+
+            ctx.fillStyle = "#f39c12"; 
+            ctx.beginPath(); ctx.arc(this.w/2, 6, 14, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#ffccbc"; 
+            ctx.beginPath(); ctx.arc(this.w/2 + (this.vx > 0 ? 2 : -2), 8, 12, 0, Math.PI*2); ctx.fill();
+            
+            ctx.fillStyle = "#e74c3c"; ctx.fillRect(2, 2, this.w - 4, 6);
+
+            ctx.fillStyle = "#2c3e50";
+            let eyeDir = this.vx >= 0 ? 4 : -4;
+            ctx.fillRect(this.w/2 + eyeDir, 6, 3, 4);
+
+            drawDetailedLimb(this.w/2, this.h/2, swing, 16, 6, "#85c1e9", "#2980b9"); 
+            drawDetailedLimb(this.w/2, this.h - 14, -swing, 18, 8, "#34495e", "#2c3e50"); 
+
+            ctx.restore();
+        }
+    }
+
+    class Platform {
+        constructor(x, y, w, h) { this.x = x; this.y = y; this.w = w; this.h = h; }
+        draw() {
+            ctx.save(); ctx.translate(this.x - camera.x, this.y - camera.y);
+            
+            ctx.fillStyle = "#3e2723"; // Dark brown/black wasteland dirt
+            ctx.fillRect(0, 0, this.w, this.h);
+            
+            ctx.fillStyle = "#4e342e"; 
+            for(let by=0; by<this.h; by+=20) {
+                let offset = (by % 40 === 0) ? 0 : 20;
+                for(let bx=-offset; bx<this.w; bx+=40) {
+                    ctx.fillRect(bx+1, by+1, 38, 18);
+                    ctx.fillStyle = "#5d4037"; ctx.fillRect(bx+1, by+1, 38, 2); 
+                    ctx.fillStyle = "#212121"; ctx.fillRect(bx+1, by+17, 38, 2); 
+                    ctx.fillRect(bx+37, by+1, 2, 18);
+                    ctx.fillStyle = "#4e342e"; 
+                }
+            }
+
+            ctx.fillStyle = "#8b0000"; // Red wasteland moss/dust
+            ctx.fillRect(0, 0, this.w, 8);
+            ctx.fillStyle = "#b71c1c"; 
+            for(let i=0; i<this.w; i+=10) {
+                if (Math.random() > 0.3) ctx.fillRect(i, 8, 10, 4 + Math.random()*6);
+            }
+            
+            ctx.strokeStyle = "#1a0000"; ctx.lineWidth = 4;
+            ctx.strokeRect(0, 0, this.w, this.h);
+            ctx.restore();
+        }
+    }
+
+    class Gate {
+        constructor(x, y) {
+            this.x = x; this.y = y; this.w = 120; this.h = 140;
+            this.isOpen = false;
+        }
+        draw() {
+            ctx.save(); ctx.translate(this.x - camera.x, this.y - camera.y);
+            this.isOpen = (player.stars >= 15);
+
+            ctx.fillStyle = "#1a0000";
+            ctx.beginPath(); ctx.roundRect(0, 0, this.w, this.h, 20); ctx.fill();
+            ctx.fillStyle = "#4a0404";
+            ctx.beginPath(); ctx.roundRect(10, 10, this.w - 20, this.h - 10, 10); ctx.fill();
+
+            if (this.isOpen) {
+                ctx.fillStyle = "#ffcc00";
+                ctx.beginPath(); ctx.roundRect(15, 15, this.w-30, this.h-15, 5); ctx.fill();
+                
+                ctx.globalAlpha = 0.6 + Math.sin(frames * 0.1) * 0.4;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath(); ctx.roundRect(20, 20, this.w-40, this.h-20, 5); ctx.fill();
+
+                ctx.globalAlpha = 1;
+                if (frames % 10 === 0) burst(this.x + this.w/2, this.y + this.h/2, "#ffcc00", 2);
+            } else {
+                ctx.fillStyle = "#2c3e50";
+                ctx.fillRect(15, 15, this.w/2 - 15, this.h-15);
+                ctx.fillRect(this.w/2, 15, this.w/2 - 15, this.h-15);
+                
+                ctx.fillStyle = "#ff0000";
+                ctx.beginPath(); ctx.arc(this.w/2, this.h/2, 12, 0, Math.PI*2); ctx.fill();
+            }
+            ctx.restore();
+        }
+    }
+
+    class Archer {
+        constructor(x, y, upsideDown = false) {
+            this.x = x; this.y = y; this.w = 34; this.h = 44;
+            this.active = true; 
+            this.cooldown = Math.random() * 150 + 50; 
+            this.dir = 1; this.patrolStart = x;
+            this.upsideDown = upsideDown; 
+            this.state = 'idle';
+        }
+        update() {
+            this.cooldown--;
+            let dy = Math.abs(player.y - this.y);
+            let dx = Math.abs(player.x - this.x);
+            
+            if (dx < 700 && dy < 500) {
+                this.state = 'aiming';
+                this.dir = player.x > this.x ? 1 : -1;
+                
+                if (this.cooldown <= 0) {
+                    let bowX = this.x + this.w/2;
+                    let bowY = this.upsideDown ? this.y + this.h - 15 : this.y + 15;
+                    let pTargetX = player.x + player.w/2;
+                    let pTargetY = player.y + player.h/2;
+                    let angle = Math.atan2(pTargetY - bowY, pTargetX - bowX);
+                    
+                    entities.bullets.push(new Arrow(bowX, bowY, angle, 4.5, false));
+                    this.cooldown = 120 + Math.random() * 60; 
+                }
+            } else {
+                this.state = 'patrol';
+                this.x += this.dir * 0.8;
+                if (Math.abs(this.x - this.patrolStart) > 100) this.dir *= -1;
+            }
+        }
+        draw() {
+            ctx.save(); 
+            ctx.translate(this.x - camera.x + this.w/2, this.y - camera.y + this.h/2);
+            if (this.upsideDown) ctx.scale(1, -1);
+            ctx.translate(-this.w/2, -this.h/2);
+
+            ctx.fillStyle = "#1a252f"; ctx.beginPath(); ctx.roundRect(0, 0, this.w, this.h, 4); ctx.fill();
+            ctx.fillStyle = "#34495e"; ctx.beginPath(); ctx.roundRect(2, 2, this.w-4, this.h-4, 2); ctx.fill();
+            
+            ctx.fillStyle = "#bdc3c7"; ctx.beginPath(); ctx.arc(this.w/2, 10, 14, Math.PI, 0); ctx.fill();
+            ctx.fillStyle = "#7f8c8d"; ctx.fillRect(4, 10, this.w-8, 4); 
+            
+            ctx.fillStyle = "#ffcc00"; 
+            ctx.fillRect(this.dir === 1 ? 20 : 10, 8, 4, 4); 
+            
+            ctx.save();
+            ctx.translate(this.w/2, 20);
+            if (this.state === 'aiming') {
+                let bowAngle = Math.atan2((player.y + player.h/2) - (this.y + 20), (player.x + player.w/2) - (this.x + this.w/2));
+                if (this.upsideDown) bowAngle *= -1;
+                ctx.rotate(bowAngle);
+            } else {
+                ctx.rotate(this.dir === 1 ? 0 : Math.PI); 
+            }
+            
+            ctx.strokeStyle = "#8b0000"; ctx.lineWidth = 4; 
+            ctx.beginPath(); ctx.arc(0, 0, 16, -Math.PI/2.5, Math.PI/2.5, false); ctx.stroke();
+            ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(6, -15); ctx.lineTo(-5, 0); ctx.lineTo(6, 15); ctx.stroke();
+            ctx.restore();
+
+            ctx.restore();
+        }
+    }
+
+    class Knight {
+        constructor(x, y, upsideDown = false) {
+            this.x = x; this.y = y; this.w = 40; this.h = 44;
+            this.active = true; this.dir = 1; this.state = 'patrol';
+            this.animTimer = 0; this.upsideDown = upsideDown;
+            this.patrolStart = x;
+        }
+        update() {
+            let dy = Math.abs(player.y - this.y);
+            let dx = Math.abs(player.x - this.x);
+            let sameGravity = (this.upsideDown && WORLD.gravityDir === -1) || (!this.upsideDown && WORLD.gravityDir === 1);
+
+            if (sameGravity && dy < 80 && dx < 450) {
+                this.state = 'chase';
+            } else if (dx > 550 || !sameGravity) {
+                this.state = 'patrol';
+            }
+
+            if (this.state === 'chase') {
+                this.dir = player.x > this.x ? 1 : -1;
+                this.x += this.dir * 2.8; 
+                this.animTimer += 0.4;
+                
+                if (dx < this.w && dy < this.h) {
+                    player.hp -= 0.5; 
+                    burst(player.x + 15, player.y + 20, "#e74c3c", 2);
+                    if (player.hp <= 0) endGame(false);
+                }
+            } else {
+                this.x += this.dir * 0.8; 
+                this.animTimer += 0.15;
+                if (Math.abs(this.x - this.patrolStart) > 150) this.dir *= -1;
+            }
+        }
+        draw() {
+            ctx.save(); 
+            ctx.translate(this.x - camera.x + this.w/2, this.y - camera.y + this.h/2);
+            if (this.upsideDown) ctx.scale(1, -1);
+            ctx.translate(-this.w/2, -this.h/2);
+            
+            ctx.translate(this.w/2, this.h); ctx.rotate(Math.sin(this.animTimer)*0.15); ctx.translate(-this.w/2, -this.h);
+
+            ctx.fillStyle = "#4a4e69"; ctx.beginPath(); ctx.roundRect(0, 0, this.w, this.h, 6); ctx.fill();
+            ctx.fillStyle = "#9a8c98"; ctx.beginPath(); ctx.roundRect(4, 4, this.w-8, this.h-8, 4); ctx.fill(); 
+            
+            ctx.fillStyle = "#22223b";
+            ctx.fillRect(this.dir === 1 ? 15 : 5, 8, 20, 8);
+            ctx.fillStyle = "#ffcc00"; 
+            ctx.fillRect(this.dir === 1 ? 25 : 10, 10, 4, 4);
+
+            ctx.fillStyle = "#4a4e69";
+            ctx.fillRect(this.dir === 1 ? 30 : -5, 20, 15, 6); 
+            ctx.fillStyle = "#c9ada7";
+            ctx.fillRect(this.dir === 1 ? 40 : -15, 10, 10, 30); 
+            ctx.fillStyle = "#f2e9e4";
+            ctx.fillRect(this.dir === 1 ? 45 : -15, 10, 5, 30); 
+
+            ctx.restore();
+        }
+    }
+
+    class Arrow {
+        constructor(x, y, angle, speed, isPlayer) {
+            this.x = x; this.y = y; this.w = 24; this.h = 6;
+            this.vx = Math.cos(angle) * speed; this.vy = Math.sin(angle) * speed;
+            this.active = true; this.isPlayer = isPlayer; this.angle = angle;
+        }
+        update() {
+            this.x += this.vx; this.y += this.vy;
+            for (let p of entities.platforms) {
+                if (this.x + this.w/2 > p.x && this.x - this.w/2 < p.x + p.w && this.y > p.y && this.y < p.y + p.h) {
+                    this.active = false; burst(this.x, this.y, "#fff", 6); return;
+                }
+            }
+            if (this.x < 0 || this.x > WORLD.w || this.y < 0 || this.y > WORLD.h) this.active = false;
+        }
+        draw() {
+            ctx.save(); ctx.translate(this.x - camera.x, this.y - camera.y);
+            ctx.rotate(this.angle);
+            
+            if (this.isPlayer) {
+                ctx.shadowBlur = 15; ctx.shadowColor = "#3498db";
+                ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.roundRect(-8, -3, 16, 6, 3); ctx.fill();
+                ctx.fillStyle = "#3498db"; ctx.beginPath(); ctx.roundRect(-4, -1, 8, 2, 1); ctx.fill();
+            } else {
+                ctx.fillStyle = "#1a0000"; ctx.fillRect(-12, -1, 24, 2); 
+                ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.moveTo(12, -4); ctx.lineTo(18, 0); ctx.lineTo(12, 4); ctx.fill(); 
+                ctx.fillStyle = "#fff"; ctx.fillRect(-12, -3, 4, 6); 
+            }
+            ctx.restore();
+        }
+    }
+
+    class Relic {
+        constructor(x, y) { this.x = x; this.y = y; this.active = true; }
+        draw() {
+            ctx.save(); ctx.translate(this.x - camera.x, this.y - camera.y + Math.sin(frames * 0.05)*8);
+            ctx.fillStyle = "#06d6a0"; // Neon Green Core
+            ctx.beginPath(); ctx.moveTo(0,-16); ctx.lineTo(5,-5); ctx.lineTo(16,-5); ctx.lineTo(7,3); ctx.lineTo(10,14); ctx.lineTo(0,8); ctx.lineTo(-10,14); ctx.lineTo(-7,3); ctx.lineTo(-16,-5); ctx.lineTo(-5,-5); ctx.fill();
+            ctx.fillStyle = "#fff"; 
+            ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(3,-3); ctx.lineTo(10,-3); ctx.lineTo(4,2); ctx.lineTo(6,9); ctx.lineTo(0,5); ctx.lineTo(-6,9); ctx.lineTo(-4,2); ctx.lineTo(-10,-3); ctx.lineTo(-3,-3); ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x; this.y = y; this.color = color;
+            this.vx = (Math.random() - 0.5) * 10; this.vy = (Math.random() - 0.5) * 10;
+            this.life = 1.0; this.active = true;
+        }
+        update() {
+            this.x += this.vx; this.y += this.vy; this.life -= 0.05;
+            if (this.life <= 0) this.active = false;
+        }
+        draw() {
+            ctx.save(); ctx.translate(this.x - camera.x, this.y - camera.y);
+            ctx.globalAlpha = Math.max(0, this.life); ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.roundRect(0,0,5,5,2); ctx.fill(); ctx.restore();
+        }
+    }
+
+    const player = new Player();
+
+    function createRuin(x, minW, maxW, maxH) {
+        let w = minW + Math.random()*(maxW - minW);
+        let h = 150 + Math.random()*maxH;
+        let spikes = [];
+        let numSpikes = 4 + Math.floor(Math.random()*4);
+        for(let j=0; j<=numSpikes; j++) {
+            spikes.push({x: (w/numSpikes)*j, y: Math.random()*50});
+        }
+        let rebarHeight = Math.random() > 0.6 ? 40 + Math.random() * 60 : 0;
+        return {x, w, h, spikes, rebarHeight};
+    }
+
+    function generateCastle() {
+        entities = { platforms: [], enemies: [], bullets: [], ambient: [], stars: [], gate: null, ruinsBg: [], ruinsMid: [], ruinsFg: [] };
+        
+        // Procedural Ruined City Silhouette Generator
+        for(let i=0; i<WORLD.w * 1.5; i+=100) { if(Math.random() > 0.3) entities.ruinsBg.push(createRuin(i, 80, 250, 400)); }
+        for(let i=0; i<WORLD.w * 1.5; i+=150) { if(Math.random() > 0.2) entities.ruinsMid.push(createRuin(i, 100, 300, 500)); }
+        for(let i=0; i<WORLD.w * 1.5; i+=250) { entities.ruinsFg.push(createRuin(i, 150, 400, 600)); }
+
+        entities.platforms.push(new Platform(-50, 0, 50, WORLD.h)); 
+        entities.platforms.push(new Platform(WORLD.w, 0, 50, WORLD.h)); 
+        entities.platforms.push(new Platform(0, WORLD.h - 40, WORLD.w, 40)); 
+
+        for (let i = 1; i <= 10; i++) {
+            let fy = WORLD.h - (i * 280);
+            let cx = 100;
+            
+            while (cx < WORLD.w - 300) {
+                let pWidth = 250 + Math.random() * 350;
+                entities.platforms.push(new Platform(cx, fy, pWidth, 40)); 
+                
+                if (Math.random() > 0.3) {
+                    let upsideDown = Math.random() > 0.5; 
+                    let spawnY = upsideDown ? fy + 40 : fy - 45;
+
+                    if (i > 3 && Math.random() > 0.5) entities.enemies.push(new Knight(cx + pWidth/2, spawnY, upsideDown));
+                    else entities.enemies.push(new Archer(cx + pWidth/2, spawnY, upsideDown));
+                }
+                
+                entities.platforms.push(new Platform(cx + pWidth + 40, fy + 140, 100, 20)); 
+
+                cx += pWidth + 180 + Math.random() * 150; 
+            }
+        }
+
+        while (entities.stars.length < 15) {
+            let p = entities.platforms[Math.floor(Math.random() * entities.platforms.length)];
+            if (p.y < WORLD.h - 500 && p.w > 200) entities.stars.push(new Relic(p.x + p.w/2, p.y - 70));
+        }
+
+        let topPlatforms = entities.platforms.filter(p => p.y < WORLD.h - 2500 && p.w > 200);
+        let exitPlatform = topPlatforms[topPlatforms.length - 1]; 
+        if (!exitPlatform) exitPlatform = entities.platforms[0]; 
+        entities.gate = new Gate(exitPlatform.x + exitPlatform.w/2 - 60, exitPlatform.y - 140);
+
+        player.x = 200; player.y = WORLD.h - 100;
+        player.hp = 100; player.stars = 0; WORLD.gravityDir = 1;
+        gameState = 'playing';
+        document.getElementById('overlay').style.display = 'none';
+        document.getElementById('objective-text').innerText = "Collect 15 Cores to activate the Portal!";
+        document.getElementById('objective-text').style.color = "#06d6a0";
+    }
+
+    function burst(x, y, color, count = 8) {
+        for(let i=0; i<count; i++) entities.ambient.push(new Particle(x, y, color));
+    }
+
+    function drawRuinLayer(ruinArray, color, scrollSpeed, yOffset) {
+        ctx.save();
+        ctx.translate(-camera.x * scrollSpeed, h - camera.y * scrollSpeed - yOffset);
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+
+        ruinArray.forEach(r => {
+            ctx.beginPath();
+            ctx.moveTo(r.x, 1000);
+            ctx.lineTo(r.x, 1000 - r.h);
+            r.spikes.forEach(s => {
+                ctx.lineTo(r.x + s.x, 1000 - r.h + s.y);
+            });
+            ctx.lineTo(r.x + r.w, 1000 - r.h);
+            ctx.lineTo(r.x + r.w, 1000);
+            ctx.fill();
+
+            if (r.rebarHeight > 0) {
+                ctx.beginPath();
+                ctx.moveTo(r.x + r.w/2, 1000 - r.h);
+                ctx.lineTo(r.x + r.w/2, 1000 - r.h - r.rebarHeight);
+                ctx.moveTo(r.x + r.w/2 - 15, 1000 - r.h - r.rebarHeight + 15);
+                ctx.lineTo(r.x + r.w/2 + 25, 1000 - r.h - r.rebarHeight + 5);
+                ctx.stroke();
+            }
+        });
+        ctx.restore();
+    }
+
+    function drawBackground() {
+        // Deep Orange/Red Sky
+        let bg = ctx.createLinearGradient(0, 0, 0, h);
+        bg.addColorStop(0, '#ff4500'); 
+        bg.addColorStop(0.6, '#ff8c00'); 
+        bg.addColorStop(1, '#ffb347'); 
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+
+        // Sun
+        ctx.save(); ctx.translate(w*0.7 - camera.x * 0.02, h*0.4 - camera.y * 0.02);
+        ctx.fillStyle = "#ffdb58";
+        ctx.shadowBlur = 40; ctx.shadowColor = "#ffdb58";
+        ctx.beginPath(); ctx.arc(0, 0, 45, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+
+        // Parallax Wasteland City
+        drawRuinLayer(entities.ruinsBg, "#8b0000", 0.1, 400); // Distant Dark Red
+        drawRuinLayer(entities.ruinsMid, "#4a0404", 0.2, 300); // Mid Deep Crimson
+        drawRuinLayer(entities.ruinsFg, "#1a0000", 0.35, 100); // Foreground Near Black
+    }
+
+    function engineTick() {
+        if (gameState === 'playing') {
+            player.update();
+            entities.enemies.forEach(e => e.update());
+            entities.bullets.forEach(b => b.update());
+            entities.ambient.forEach(p => p.update());
+
+            entities.bullets.forEach(b => {
+                if (!b.active) return;
+                if (b.isPlayer) {
+                    entities.enemies.forEach(e => {
+                        if (e.active && b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h) {
+                            e.active = false; b.active = false; burst(e.x, e.y, "#ffcc00"); 
+                        }
+                    });
+                } else {
+                    if (b.x > player.x && b.x < player.x + player.w && b.y > player.y && b.y < player.y + player.h) {
+                        b.active = false; player.hp -= 4; 
+                        burst(player.x + 15, player.y + 20, "#3498db");
+                        if (player.hp <= 0) endGame(false);
+                    }
+                }
+            });
+
+            entities.stars.forEach(s => {
+                if (s.active && player.x < s.x + 20 && player.x + player.w > s.x - 20 && player.y < s.y + 20 && player.y + player.h > s.y - 20) {
+                    s.active = false; 
+                    player.stars++; 
+                    player.hp = Math.min(100, player.hp + 25); 
+                    burst(s.x, s.y, "#06d6a0", 20);
+                    
+                    if (player.stars >= 15) {
+                        document.getElementById('objective-text').innerText = "PORTAL OPEN. ESCAPE!";
+                        document.getElementById('objective-text').style.color = "#ffcc00";
+                    }
+                }
+            });
+
+            if (entities.gate && entities.gate.isOpen) {
+                if (player.x < entities.gate.x + entities.gate.w && player.x + player.w > entities.gate.x && player.y < entities.gate.y + entities.gate.h && player.y + player.h > entities.gate.y) {
+                    endGame(true);
+                }
+            }
+
+            entities.bullets = entities.bullets.filter(b => b.active);
+            entities.enemies = entities.enemies.filter(e => e.active);
+            entities.ambient = entities.ambient.filter(a => a.active);
+            entities.stars = entities.stars.filter(s => s.active);
+        }
+
+        drawBackground();
+        entities.platforms.forEach(p => p.draw());
+        if (entities.gate) entities.gate.draw();
+        entities.stars.forEach(s => s.draw());
+        entities.enemies.forEach(e => e.draw());
+        if (player.hp > 0) player.draw();
+        entities.bullets.forEach(b => b.draw());
+        entities.ambient.forEach(a => a.draw());
+
+        document.getElementById('hp-fill').style.width = Math.max(0, player.hp) + '%';
+        document.getElementById('stars').innerText = player.stars;
+
+        frames++;
+        requestAnimationFrame(engineTick);
+    }
+
+    function endGame(win) {
+        gameState = win ? 'won' : 'lost';
+        document.getElementById('overlay').style.display = 'flex';
+        document.getElementById('end-title').innerText = win ? "PORTAL BREACHED" : "SYSTEM FAILURE";
+        document.getElementById('end-title').style.color = win ? "#ffcc00" : "#8b0000";
+    }
+
+    window.addEventListener('keydown', e => { keys[e.code] = true; });
+    window.addEventListener('keyup', e => { keys[e.code] = false; });
+    
+    window.addEventListener('mousedown', e => {
+        if (gameState !== 'playing') { generateCastle(); return; } 
+        if (player.cooldown <= 0) {
+            let worldMouseX = e.clientX + camera.x;
+            let worldMouseY = e.clientY + camera.y;
+            let angle = Math.atan2(worldMouseY - (player.y + 20), worldMouseX - (player.x + 15));
+            entities.bullets.push(new Arrow(player.x + 15, player.y + 20, angle, 18, true));
+            player.cooldown = 12; 
+        }
+    });
+
+    window.addEventListener('resize', () => { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; });
+
+    w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight;
+    generateCastle(); 
+    engineTick();
+</script>
+</body>
+</html>
